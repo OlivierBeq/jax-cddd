@@ -1,7 +1,8 @@
 _cddd_ref_/
 
-# Converted model weights, produced locally by scripts/convert_checkpoint.py
+# Downloaded on demand from the GitHub release (see jax_cddd/params.py, jax_cddd/vocab.py)
 src/jax_cddd/data/default_model_params.npz
+src/jax_cddd/data/indices_char.npy
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

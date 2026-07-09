@@ -1,9 +1,17 @@
 """Greedy and beam-search decoding for the CDDD decoder (descriptor -> SMILES),
 matching the original TF1 ``BeamSearchDecoder``'s behavior with
 ``length_penalty_weight=0.0`` (the ``default_model``'s configuration).
+
+The actual numeric work (``_greedy_decode_core``/``_beam_search_decode_core``)
+is jit-compiled and takes only arrays/static ints -- never the ``Vocabulary``
+object itself (a plain Python dataclass holding dicts, which isn't a valid jit
+argument) -- so repeated calls with the same ``(batch, beam_width, max_len)``
+shape reuse a cached compiled executable instead of re-tracing/recompiling
+and re-dispatching each op eagerly.
 """
 from __future__ import annotations
 
+from functools import partial
 from typing import List, Tuple
 
 import jax
@@ -15,6 +23,13 @@ from jax_cddd.params import CDDDParams
 from jax_cddd.vocab import Vocabulary
 
 NEG_INF = -1e9
+
+# Real SMILES are essentially never this long (drug-like molecules are
+# typically well under 100 tokens); this is a generous cap chosen to keep the
+# default decode latency low while still being large enough that legitimate
+# molecules are never truncated. Override max_len= directly for unusually
+# large inputs (e.g. peptides/oligomers).
+DEFAULT_MAX_LEN = 140
 
 
 def truncate_at_stop(ids_row: np.ndarray, stop_id: int) -> np.ndarray:
@@ -28,15 +43,13 @@ def truncate_at_stop(ids_row: np.ndarray, stop_id: int) -> np.ndarray:
     return ids_row[: stop_positions[0] + 1]
 
 
-def greedy_decode(
-    params: CDDDParams, descriptor: jnp.ndarray, vocab: Vocabulary, max_len: int = 1000
-) -> np.ndarray:
-    """``[batch, emb_size]`` descriptor -> ``[batch, max_len]`` int32 token ids
-    (argmax at every step; no in-loop early stopping -- see ``truncate_at_stop``).
-    """
+@partial(jax.jit, static_argnames=("max_len",))
+def _greedy_decode_core(
+    params: CDDDParams, descriptor: jnp.ndarray, start_id: jnp.ndarray, max_len: int
+) -> jnp.ndarray:
     batch = descriptor.shape[0]
     states = decoder_initial_states(params, descriptor)
-    prev_ids = jnp.full((batch,), vocab.start_id, dtype=jnp.int32)
+    prev_ids = jnp.full((batch,), start_id, dtype=jnp.int32)
 
     def step(carry, _):
         states, prev_ids = carry
@@ -45,11 +58,21 @@ def greedy_decode(
         return (new_states, next_ids), next_ids
 
     _, all_ids = jax.lax.scan(step, (states, prev_ids), xs=None, length=max_len)
-    return np.asarray(jnp.swapaxes(all_ids, 0, 1))  # [batch, max_len]
+    return jnp.swapaxes(all_ids, 0, 1)  # [batch, max_len]
+
+
+def greedy_decode(
+    params: CDDDParams, descriptor: jnp.ndarray, vocab: Vocabulary, max_len: int = DEFAULT_MAX_LEN
+) -> np.ndarray:
+    """``[batch, emb_size]`` descriptor -> ``[batch, max_len]`` int32 token ids
+    (argmax at every step; no in-loop early stopping -- see ``truncate_at_stop``).
+    """
+    ids = _greedy_decode_core(params, descriptor, jnp.int32(vocab.start_id), max_len)
+    return np.asarray(ids)
 
 
 def greedy_decode_smiles(
-    params: CDDDParams, descriptor: jnp.ndarray, vocab: Vocabulary, max_len: int = 1000
+    params: CDDDParams, descriptor: jnp.ndarray, vocab: Vocabulary, max_len: int = DEFAULT_MAX_LEN
 ) -> List[str]:
     ids = greedy_decode(params, descriptor, vocab, max_len=max_len)
     return [vocab.decode(truncate_at_stop(row, vocab.stop_id)) for row in ids]
@@ -63,26 +86,17 @@ def _gather_beam(x: jnp.ndarray, beam_idx: jnp.ndarray) -> jnp.ndarray:
     return jnp.take_along_axis(x, idx, axis=1)
 
 
-def beam_search_decode(
+@partial(jax.jit, static_argnames=("beam_width", "max_len"))
+def _beam_search_decode_core(
     params: CDDDParams,
     descriptor: jnp.ndarray,
-    vocab: Vocabulary,
-    beam_width: int = 10,
-    max_len: int = 1000,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """``[batch, emb_size]`` descriptor -> beam-searched hypotheses.
-
-    Returns:
-        seqs: ``[batch, beam_width, max_len]`` int32, best-first (index 0 is the
-            top hypothesis for each batch element).
-        cum_logprob: ``[batch, beam_width]`` cumulative log-probabilities.
-
-    ``length_penalty_weight`` is fixed at 0 (raw cumulative log-prob ranking),
-    matching the original ``default_model``'s ``BeamSearchDecoder`` config.
-    """
+    start_id: jnp.ndarray,
+    stop_id: jnp.ndarray,
+    beam_width: int,
+    max_len: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
     B = descriptor.shape[0]
     K = beam_width
-    start_id, stop_id = vocab.start_id, vocab.stop_id
 
     init_states = decoder_initial_states(params, descriptor)
     states = tuple(jnp.broadcast_to(s[:, None, :], (B, K, s.shape[-1])) for s in init_states)
@@ -131,7 +145,30 @@ def beam_search_decode(
     carry = (states, prev_ids, cum_logprob, finished, seqs)
     carry, _ = jax.lax.scan(step, carry, jnp.arange(max_len))
     _, _, final_cum_logprob, _, final_seqs = carry
-    return np.asarray(final_seqs), np.asarray(final_cum_logprob)
+    return final_seqs, final_cum_logprob
+
+
+def beam_search_decode(
+    params: CDDDParams,
+    descriptor: jnp.ndarray,
+    vocab: Vocabulary,
+    beam_width: int = 10,
+    max_len: int = DEFAULT_MAX_LEN,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """``[batch, emb_size]`` descriptor -> beam-searched hypotheses.
+
+    Returns:
+        seqs: ``[batch, beam_width, max_len]`` int32, best-first (index 0 is the
+            top hypothesis for each batch element).
+        cum_logprob: ``[batch, beam_width]`` cumulative log-probabilities.
+
+    ``length_penalty_weight`` is fixed at 0 (raw cumulative log-prob ranking),
+    matching the original ``default_model``'s ``BeamSearchDecoder`` config.
+    """
+    seqs, cum_logprob = _beam_search_decode_core(
+        params, descriptor, jnp.int32(vocab.start_id), jnp.int32(vocab.stop_id), beam_width, max_len
+    )
+    return np.asarray(seqs), np.asarray(cum_logprob)
 
 
 def beam_search_decode_smiles(
@@ -139,7 +176,7 @@ def beam_search_decode_smiles(
     descriptor: jnp.ndarray,
     vocab: Vocabulary,
     beam_width: int = 10,
-    max_len: int = 1000,
+    max_len: int = DEFAULT_MAX_LEN,
     num_top: int = 1,
 ) -> List[List[str]]:
     seqs, _ = beam_search_decode(params, descriptor, vocab, beam_width=beam_width, max_len=max_len)

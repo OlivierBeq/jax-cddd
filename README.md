@@ -28,42 +28,33 @@ auxiliary QSAR property head are not ported.
 
 ## 📦 Installation
 
-Two environments are used: a main runtime environment (JAX/Flax/RDKit) and a
-throwaway environment carrying a **legacy TensorFlow 1.15** (the last TF1
-release, still with a full `tf.contrib`), used to convert the original
-checkpoint and — since it can run the real, unmodified original graph — to
-validate the JAX port against it (see [Validation](#-validation)).
-
 ```bash
-# Main runtime environment
 micromamba create -n jax-cddd python=3.11 pip -c conda-forge -y
 micromamba run -n jax-cddd pip install -e .
-
-# Legacy environment (needs an old Python for the old TF wheel)
-micromamba create -n jax-cddd-convert python=3.7 pip -c conda-forge -y
-micromamba run -n jax-cddd-convert pip install "tensorflow==1.15.5" "protobuf==3.20.3"
 ```
 
-The `jax-cddd-convert` env is never `pip install -e .`'d (this package requires
-Python ≥3.10) — its scripts add `src/` to `sys.path` directly to reuse
-`jax_cddd`'s dependency-free submodules (`vocab.py`, `param_names.py`).
+### Getting the pretrained weights
 
-Then convert the pretrained checkpoint once (needs `default_model.zip`, the
-original TF1 checkpoint, placed under `src/jax_cddd/_cddd_ref_/`):
+Two data files — the converted weights
+(`src/jax_cddd/data/default_model_params.npz`, ~200 MB) and the vocabulary
+(`src/jax_cddd/data/indices_char.npy`) — are downloaded automatically, 
+with checksum verification, the first time you instantiate `CDDDModel()`,
+if they aren't already present locally — see [Quickstart](#-quickstart) below.
+No action needed; they're fetched from this repo's [GitHub release](https://github.com/OlivierBeq/jax-cddd/releases/tag/model_weights).
+To point at a different location instead (e.g. a fork's own release), override
+via environment variables:
 
 ```bash
-micromamba run -n jax-cddd-convert python scripts/convert_checkpoint.py
+export JAX_CDDD_WEIGHTS_URL="https://.../default_model_params.npz"
+export JAX_CDDD_VOCAB_URL="https://.../indices_char.npy"
 ```
-
-This writes `src/jax_cddd/data/default_model_params.npz` (~200 MB, gitignored —
-convert once locally, it isn't downloaded or committed).
 
 ## 🚀 Quickstart
 
 ```python
 from jax_cddd.inference import CDDDModel
 
-model = CDDDModel()  # loads the converted default_model weights
+model = CDDDModel()  # downloads the converted default_model weights on first use
 
 # Embed
 embedding = model.seq_to_emb("CC(=O)Oc1ccccc1C(=O)O")  # aspirin -> [512] array
@@ -76,13 +67,34 @@ print(smiles)  # "CC(=O)Oc1ccccc1C(=O)O"
 `CDDDModel` loads once and can be reused for as many calls as you like — hold
 onto the instance rather than re-creating it per molecule.
 
-## 📚 Batches
+## ⚡ Performance
 
-Both methods accept lists directly and are the right choice for anything from
-a handful up to a few thousand molecules at once:
+Both `seq_to_emb` and `emb_to_seq` are JIT-compiled under the hood. `CDDDModel()`
+eagerly warms up the shapes a single-molecule workload hits during
+construction (a few extra seconds, on top of loading the weights), so a
+freshly constructed model's first real call is already fast rather than
+paying that compile cost then:
+
+- `seq_to_emb`: ~10-30 ms per molecule.
+- `emb_to_seq`: ~70-90 ms per molecule (default `beam_width=10`).
+
+Molecules with an unusual shape (SMILES longer than ~64 tokens, or a
+non-default `beam_width`/`max_len`) fall outside the warmed-up set and pay a
+one-time compile the first time that particular shape is used — every
+subsequent call with the same shape is fast again. Pass `CDDDModel(warmup=False)`
+to skip warmup and get a near-instant construction instead, if you'd rather
+pay the compile cost on first use than at startup.
+
+## 📚 Batches, at any size
+
+Both methods accept lists directly, from a handful of molecules up to entire
+multi-million-molecule datasets — large inputs are automatically processed in
+memory-bounded chunks under the hood (sorted by length first, to minimize the
+compute wasted padding short sequences up to one long outlier's length), so
+you never need to chunk your own input:
 
 ```python
-smiles_list = ["CCO", "c1ccccc1", "CC(=O)Nc1ccc(O)cc1"]
+smiles_list = [...]  # any size
 
 embeddings = model.seq_to_emb(smiles_list)          # [n, 512] array
 reconstructed = model.emb_to_seq(embeddings)         # list[str]
@@ -91,61 +103,20 @@ reconstructed = model.emb_to_seq(embeddings)         # list[str]
 top3 = model.emb_to_seq(embeddings, beam_width=10, num_top=3)  # list[list[str]]
 ```
 
-Two knobs matter for quality/speed:
+Knobs that matter for quality/speed/memory:
 - `beam_width` (default `10`): higher explores more reconstruction hypotheses;
   `beam_width=1` degenerates to plain greedy decoding and is fastest.
 - `max_len` (default `1000`): decoding step cap; lower it if you know your
   molecules are small, to save time.
+- `chunk_size` (default `512` for `seq_to_emb`, `256` for `emb_to_seq`):
+  maximum number of molecules/embeddings processed per internal batch. Lower
+  it if you hit GPU memory limits (beam search holds
+  `chunk_size × beam_width × max_len` worth of state, so it's more
+  memory-hungry than encoding); raise it for more throughput on a bigger GPU.
 
-## ⚡ Large-scale, memory-efficient batching
-
-A batch pads every sequence up to the length of its longest member, and beam
-search allocates `batch × beam_width × max_len` worth of state. Passing an
-entire multi-million-molecule dataset as one batch will exhaust GPU memory long
-before it finishes. For large datasets, **chunk the work** and, ideally,
-**sort by length first** so each chunk pads efficiently instead of wasting
-compute on one long outlier per batch:
-
-```python
-import numpy as np
-
-def embed_large(model, smiles_list, chunk_size=512):
-    """Memory-efficient embedding for large SMILES collections."""
-    order = np.argsort([len(s) for s in smiles_list])  # group similar lengths
-    sorted_smiles = [smiles_list[i] for i in order]
-
-    embeddings = np.empty((len(smiles_list), 512), dtype=np.float32)
-    for start in range(0, len(sorted_smiles), chunk_size):
-        chunk = sorted_smiles[start : start + chunk_size]
-        chunk_idx = order[start : start + chunk_size]
-        embeddings[chunk_idx] = model.seq_to_emb(chunk)
-    return embeddings
-
-
-def reconstruct_large(model, embeddings, chunk_size=256, beam_width=10):
-    """Memory-efficient reconstruction; decoding is heavier than encoding, so
-    use a smaller chunk_size here than for embed_large."""
-    results = []
-    for start in range(0, len(embeddings), chunk_size):
-        chunk = embeddings[start : start + chunk_size]
-        results.extend(model.emb_to_seq(chunk, beam_width=beam_width))
-    return results
-```
-
-Practical tips:
-- 🔹 **Tune `chunk_size` to your GPU.** Start around `256`–`1024` for
-  embedding and half that for reconstruction (beam search is more
-  memory-hungry); increase until you're close to, but under, your GPU's
-  memory limit.
-- 🔹 **Sort by length before chunking.** Padding cost is set by the longest
-  sequence in a chunk — grouping similar lengths together avoids paying for
-  padding on every short molecule in a chunk that also contains one long one.
-- 🔹 **Prefer greedy (`beam_width=1`) for very large reconstruction runs** if
-  top-1 accuracy is good enough — beam search is several times more
-  expensive in both memory and time.
-- 🔹 **Write results incrementally** (e.g. append each chunk to disk) rather
-  than accumulating everything in a Python list, if the dataset doesn't fit
-  comfortably in host RAM either.
+A couple of tips beyond that for very large runs:
+- 🔹 **Prefer greedy (`beam_width=1`)** if top-1 accuracy is good enough —
+  beam search is several times more expensive in both memory and time.
 - 🔹 **Cap GPU preallocation on small GPUs** via
   `XLA_PYTHON_CLIENT_MEM_FRACTION` if you share the GPU with other processes
   (the package already requests a conservative `0.3` by default).
@@ -165,23 +136,31 @@ Fidelity is checked two independent ways:
    compares the JAX port to the *real, unmodified* original implementation —
    the genuine `tf.contrib.rnn.MultiRNNCell` / `tf.contrib.seq2seq.BeamSearchDecoder`
    graph, checkpoint restored via `tf.train.Saver`, executed under a legacy
-   TensorFlow 1.15 (see [Installation](#-installation)). On a handful of real
-   drugs: max embedding error `1.4e-6`, and **every reconstructed SMILES
-   matches exactly**, including the same two near-misses the original code
-   also makes (e.g. acetic acid reconstructed as its acetate anion).
+   TensorFlow 1.15. On a handful of real drugs: max embedding error `1.4e-6`,
+   and **every reconstructed SMILES matches exactly**, including the same two
+   near-misses the original code also makes (e.g. acetic acid reconstructed
+   as its acetate anion).
 
 ```bash
 micromamba run -n jax-cddd python -m pytest tests/
 ```
 
 Both fixtures are pre-generated and committed (`tests/fixtures/`), so the test
-suite above never needs TensorFlow. To regenerate them (needs the
-`jax-cddd-convert` environment):
+suite above never needs TensorFlow. Regenerating them requires a legacy
+environment (an old Python for the old TF wheel) and the original
+`default_model.zip` checkpoint placed under `src/jax_cddd/_cddd_ref_/`:
 
 ```bash
+micromamba create -n jax-cddd-convert python=3.7 pip -c conda-forge -y
+micromamba run -n jax-cddd-convert pip install "tensorflow==1.15.5" "protobuf==3.20.3"
+
 micromamba run -n jax-cddd-convert python scripts/validate_against_tf1_reference.py
 micromamba run -n jax-cddd-convert python scripts/run_original_model.py
 ```
+
+(That environment is never `pip install -e .`'d — this package requires
+Python ≥3.10 — its scripts add `src/` to `sys.path` directly to reuse
+`jax_cddd`'s dependency-free submodules.)
 
 A round-trip smoke test on real drugs (aspirin, caffeine, ibuprofen, ...) is
 also available standalone:
@@ -202,7 +181,7 @@ src/jax_cddd/
     inference.py     # CDDDModel: the public API
     _legacy_tf1/     # original TF1 reference code, kept for history
 scripts/
-    convert_checkpoint.py             # TF1 checkpoint -> JAX weights (one-off)
+    convert_checkpoint.py             # maintainer-only: how the published weights were produced
     validate_against_tf1_reference.py # from-scratch NumPy fidelity fixture
     run_original_model.py             # runs the real original TF1 graph, for fidelity fixture
     reconstruct_smoke_test.py         # end-to-end embed/reconstruct demo

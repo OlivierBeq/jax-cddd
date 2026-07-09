@@ -9,14 +9,14 @@ beyond simple concatenation bookkeeping.
 from __future__ import annotations
 
 import os
-import urllib.request
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 import jax.numpy as jnp
 import numpy as np
+from flax import struct
 
+from jax_cddd._download import download_file
 from jax_cddd.gru import GRULayerParams
 from jax_cddd.param_names import CELL_SIZES, CHAR_EMBEDDING_SIZE, EMB_SIZE, NUM_LAYERS, VOCAB_SIZE
 
@@ -34,25 +34,36 @@ __all__ = [
     "save_npz",
     "load_npz",
     "default_params_path",
+    "download_default_params",
     "load_default_model",
 ]
 
 _DEFAULT_PARAMS_FILENAME = "default_model_params.npz"
-# TODO: point this at a hosted release asset once one exists. Until then,
-# load_default_model() falls back to a clear error pointing at
-# scripts/convert_checkpoint.py, which produces this file locally from the
-# (untracked, locally-present) default_model.zip.
-_DEFAULT_PARAMS_URL = None
+
+# Can be overridden without a code change via the JAX_CDDD_WEIGHTS_URL
+# environment variable (which takes precedence over this constant).
+_DEFAULT_PARAMS_URL: Optional[str] = (
+    "https://github.com/OlivierBeq/jax-cddd/releases/download/model_weights/default_model_params.npz"
+)
+_DEFAULT_PARAMS_SHA256: Optional[str] = (
+    "0c4bd08a593c78221c20506eca8e8b88b823b98e65ef3b3784ed4a63f266bd23"
+)
+
+_PARAMS_URL_ENV_VAR = "JAX_CDDD_WEIGHTS_URL"
 
 
-@dataclass
+@struct.dataclass
 class EncoderParams:
+    """A ``flax.struct.dataclass`` (registered as a JAX pytree), so instances
+    can be passed directly into ``jax.jit``-compiled functions as ordinary
+    (traced) arguments -- not as opaque static Python objects."""
+
     layers: Tuple[GRULayerParams, ...]
     bottleneck_kernel: jnp.ndarray  # [sum(CELL_SIZES), EMB_SIZE]
     bottleneck_bias: jnp.ndarray    # [EMB_SIZE]
 
 
-@dataclass
+@struct.dataclass
 class DecoderParams:
     layers: Tuple[GRULayerParams, ...]
     init_state_kernel: jnp.ndarray    # [EMB_SIZE, sum(CELL_SIZES)]
@@ -60,7 +71,7 @@ class DecoderParams:
     output_proj_kernel: jnp.ndarray   # [CELL_SIZES[-1], VOCAB_SIZE], no bias
 
 
-@dataclass
+@struct.dataclass
 class CDDDParams:
     embedding: jnp.ndarray  # [VOCAB_SIZE, CHAR_EMBEDDING_SIZE], shared encoder/decoder
     encoder: EncoderParams
@@ -134,29 +145,58 @@ def default_params_path():
     return Path(__file__).parent / "data" / _DEFAULT_PARAMS_FILENAME
 
 
-def _download(url: str, dest) -> None:
-    dest_path = str(dest)
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    urllib.request.urlretrieve(url, dest_path)
+def download_default_params(
+    url: Optional[str] = None,
+    dest: Optional[Union[str, Path]] = None,
+    expected_sha256: Optional[str] = None,
+    force: bool = False,
+) -> Path:
+    """Download the converted ``default_model`` weights (``.npz``) from the
+    GitHub release and place them at ``dest``.
+
+    A no-op if ``dest`` already exists (unless ``force=True``), so this is safe
+    to call unconditionally on every model load -- see ``load_default_model()``.
+
+    Args:
+        url: Overrides the download URL. Defaults to the
+            ``JAX_CDDD_WEIGHTS_URL`` environment variable, then the
+            ``_DEFAULT_PARAMS_URL`` constant in this module.
+        dest: Overrides the destination path. Defaults to
+            ``default_params_path()``.
+        expected_sha256: Overrides the expected checksum (defaults to
+            ``_DEFAULT_PARAMS_SHA256``); verified after download, raising
+            ``RuntimeError`` on mismatch (the bad download is removed, not left
+            behind).
+        force: Re-download even if ``dest`` already exists.
+
+    Returns:
+        The path the weights are available at.
+    """
+    dest = Path(dest) if dest is not None else default_params_path()
+    resolved_url = url or os.environ.get(_PARAMS_URL_ENV_VAR) or _DEFAULT_PARAMS_URL
+    if not dest.exists() and not resolved_url:
+        raise RuntimeError(
+            f"No converted weights found at {dest}, and no download URL is "
+            f"configured. Either set the {_PARAMS_URL_ENV_VAR} environment "
+            "variable, pass url=..., or run scripts/convert_checkpoint.py (in "
+            "the `jax-cddd-convert` environment) to produce them locally from "
+            "default_model.zip."
+        )
+    return download_file(
+        resolved_url,
+        dest,
+        expected_sha256=expected_sha256 if expected_sha256 is not None else _DEFAULT_PARAMS_SHA256,
+        force=force,
+        label="pretrained CDDD weights",
+    )
 
 
 def load_default_model() -> CDDDParams:
     """Load the pretrained CDDD weights, already converted to this module's JAX
     pytree/``.npz`` format.
 
-    Looks for a local cached copy first (produced by ``scripts/convert_checkpoint.py``
-    from the locally-present ``default_model.zip`` reference checkpoint). No hosted
-    download exists yet, so if no local copy is found and no URL is configured this
-    raises with actionable instructions rather than failing silently.
+    Downloads them first (via ``download_default_params()``) if no local
+    cached copy is found -- see that function for how to configure the URL.
     """
-    path = default_params_path()
-    if not os.path.exists(path):
-        if _DEFAULT_PARAMS_URL:
-            _download(_DEFAULT_PARAMS_URL, path)
-        else:
-            raise FileNotFoundError(
-                f"No converted weights found at {path}. Run "
-                "scripts/convert_checkpoint.py (in the `jax-cddd-convert` "
-                "environment) to produce it from the local default_model.zip."
-            )
+    path = download_default_params()
     return load_npz(path)

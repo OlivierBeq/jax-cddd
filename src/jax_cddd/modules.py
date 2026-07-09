@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
+import jax
 import jax.numpy as jnp
 
 from jax_cddd.gru import run_stacked_gru, stacked_gru_step
@@ -23,12 +24,18 @@ def embed_ids(embedding: jnp.ndarray, ids: jnp.ndarray) -> jnp.ndarray:
     return jnp.take(embedding, ids, axis=0)
 
 
+@jax.jit
 def encode(params: CDDDParams, input_ids: jnp.ndarray, seq_len: jnp.ndarray) -> jnp.ndarray:
     """SMILES token ids ``[batch, time]`` (already ``<s>``/``</s>``-wrapped and
     padded) -> ``[batch, emb_size]`` CDDD descriptor.
 
     Matches ``GRUSeq2Seq._encoder``: char-embed -> 3-layer stacked GRU -> concat
     final per-layer states -> dense -> tanh.
+
+    JIT-compiled: repeated calls with the same ``(batch, time)`` shape reuse a
+    cached compiled executable (no eager per-op dispatch overhead) -- see
+    ``jax_cddd.inference.CDDDModel``, which pads inputs to a small, fixed set of
+    length buckets specifically to keep this cache small and hot.
     """
     x = embed_ids(params.embedding, input_ids)
     final_states, _ = run_stacked_gru(params.encoder.layers, x, seq_len=seq_len)
