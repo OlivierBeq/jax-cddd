@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "jax-cddd"
 dynamic = ["version"]
 description = "JAX port of CDDD (Continuous Data-Driven Descriptors) for molecular SMILES embedding/reconstruction"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "jax[cuda12]>=0.10",

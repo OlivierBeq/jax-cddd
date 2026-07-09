@@ -29,6 +29,13 @@ auxiliary QSAR property head are not ported.
 ## 📦 Installation
 
 ```bash
+pip install jax-cddd
+```
+
+`jax-cddd` is [on PyPI](https://pypi.org/project/jax-cddd/). For development
+(editable install from a clone), instead:
+
+```bash
 micromamba create -n jax-cddd python=3.11 pip -c conda-forge -y
 micromamba run -n jax-cddd pip install -e .
 ```
