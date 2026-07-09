@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jax-cddd"
-version = "0.1.0"
+dynamic = ["version"]
 description = "JAX port of CDDD (Continuous Data-Driven Descriptors) for molecular SMILES embedding/reconstruction"
 requires-python = ">=3.10"
 dependencies = [
@@ -31,9 +31,22 @@ dev = [
 # (vocab.py, param_names.py) straight from source via a small sys.path
 # bootstrap in each script rather than an editable install.
 
+[tool.setuptools.dynamic]
+version = {attr = "jax_cddd.__version__"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["jax_cddd*"]
+# _legacy_tf1 is original TF1 reference code kept for history/reading (see
+# README) -- it's plain TF1 source that doesn't even run under a modern
+# jax-cddd install, so it must never ship in the installed package.
+exclude = ["jax_cddd._legacy_tf1", "jax_cddd._legacy_tf1.*"]
 
 [tool.setuptools.package-data]
 jax_cddd = ["data/*.npy"]
+
+# Excluding _legacy_tf1 from `packages.find` above only stops it being treated
+# as an importable subpackage -- setuptools still sweeps its files in as
+# implicit package data of `jax_cddd` unless explicitly excluded here too.
+[tool.setuptools.exclude-package-data]
+jax_cddd = ["_legacy_tf1/*", "_legacy_tf1/**/*"]
