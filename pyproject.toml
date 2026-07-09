@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jax-cddd"
+version = "0.1.0"
+description = "JAX port of CDDD (Continuous Data-Driven Descriptors) for molecular SMILES embedding/reconstruction"
+requires-python = ">=3.10"
+dependencies = [
+    "jax[cuda12]>=0.10",
+    "flax>=0.12",
+    "optax>=0.2",
+    "rdkit>=2024.9",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# Only needed by scripts/convert_checkpoint.py and scripts/validate_against_tf1_reference.py.
+# Install in a separate environment (e.g. `jax-cddd-convert`) to avoid TF/JAX CUDA conflicts.
+convert = [
+    "tensorflow-cpu>=2.20",
+]
+dev = [
+    "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["jax_cddd*"]
+
+[tool.setuptools.package-data]
+jax_cddd = ["data/*.npy"]

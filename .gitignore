@@ -1,3 +1,8 @@
+_cddd_ref_/
+
+# Converted model weights, produced locally by scripts/convert_checkpoint.py
+src/jax_cddd/data/default_model_params.npz
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
