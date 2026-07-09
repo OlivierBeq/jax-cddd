@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from importlib import resources
+from pathlib import Path
 
 import numpy as np
 
@@ -51,9 +51,13 @@ class Vocabulary:
 
     @classmethod
     def default(cls) -> "Vocabulary":
-        path = resources.files("jax_cddd") / "data" / _DEFAULT_VOCAB_FILENAME
-        with resources.as_file(path) as resolved:
-            return cls.from_npy(resolved)
+        # Plain path lookup rather than importlib.resources (whose .files() API
+        # needs Python >=3.9): jax_cddd is always a local, non-zipped source
+        # package, so this is simpler and also keeps this module importable
+        # from the older Python required by the legacy-TF1 environment (see
+        # scripts/run_original_model.py).
+        path = Path(__file__).parent / "data" / _DEFAULT_VOCAB_FILENAME
+        return cls.from_npy(path)
 
     def tokenize(self, smiles: str) -> list:
         return re.findall(REGEX_SML, smiles)

@@ -4,17 +4,17 @@ checkpoint, for the JAX port's numerical-fidelity test (``tests/test_against_tf1
 
 Run this in the ``jax-cddd-convert`` environment (CPU TensorFlow).
 
-Why this doesn't execute the original TF1 graph: the original graph is built from
-``tf.contrib.rnn.MultiRNNCell``/``tf.contrib.seq2seq.*``, which no longer exist in
-any modern TF2 install, and even ``tf.compat.v1.nn.rnn_cell.GRUCell`` has since
-been removed (confirmed on the TF version used here). Instead, this script reads
-the checkpoint's raw tensors by name (via ``tf.train.load_checkpoint``, which only
-needs the checkpoint's variable-name->tensor map, not the old graph) and recomputes
-the encoder/decoder forward pass with an independent, from-scratch NumPy
-implementation of the documented ``tf.nn.rnn_cell.GRUCell`` formula -- deliberately
-*not* importing ``jax_cddd.gru`` (which implements the same formula in JAX), so
-this remains a genuinely independent cross-check of the JAX port's math, not just
-a check that two copies of the same code agree with each other.
+Why this doesn't execute the original TF1 graph: this script deliberately
+recomputes the encoder/decoder forward pass with an independent, from-scratch
+NumPy implementation of the documented ``tf.nn.rnn_cell.GRUCell`` formula --
+*not* importing ``jax_cddd.gru`` (which implements the same formula in JAX) and
+*not* running the original ``cddd`` graph code -- so this is a cross-check of
+the JAX port's math against the formula itself, independent of any particular
+TF version or the original repo's code. (For a complementary, genuinely
+end-to-end check that runs the actual unmodified original ``cddd`` package, see
+``scripts/run_original_model.py`` / ``tests/test_against_original_code.py``.)
+This script only needs ``tf.train.load_checkpoint`` (the checkpoint's raw
+variable-name->tensor map), so it works under any TF1 or TF2 install.
 
 Usage:
     micromamba run -n jax-cddd-convert python scripts/validate_against_tf1_reference.py \\
@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -30,9 +31,11 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 
-from jax_cddd.vocab import Vocabulary
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "src"))  # use jax_cddd from source, no install needed
+
+from jax_cddd.vocab import Vocabulary  # noqa: E402
+
 DEFAULT_ZIP = REPO_ROOT / "src" / "jax_cddd" / "_cddd_ref_" / "default_model.zip"
 DEFAULT_OUT = REPO_ROOT / "tests" / "fixtures" / "tf1_reference.npz"
 

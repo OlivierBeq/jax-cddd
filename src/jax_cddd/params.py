@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import urllib.request
 from dataclasses import dataclass
-from importlib import resources
+from pathlib import Path
 from typing import Dict, Tuple
 
 import jax.numpy as jnp
@@ -131,7 +131,7 @@ def load_npz(path, num_layers: int = NUM_LAYERS) -> CDDDParams:
 
 
 def default_params_path():
-    return resources.files("jax_cddd") / "data" / _DEFAULT_PARAMS_FILENAME
+    return Path(__file__).parent / "data" / _DEFAULT_PARAMS_FILENAME
 
 
 def _download(url: str, dest) -> None:

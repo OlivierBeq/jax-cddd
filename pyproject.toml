@@ -16,14 +16,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Only needed by scripts/convert_checkpoint.py and scripts/validate_against_tf1_reference.py.
-# Install in a separate environment (e.g. `jax-cddd-convert`) to avoid TF/JAX CUDA conflicts.
-convert = [
-    "tensorflow-cpu>=2.20",
-]
 dev = [
     "pytest>=8",
 ]
+
+# There is no `convert` extra: the `jax-cddd-convert` environment (used by
+# scripts/convert_checkpoint.py, scripts/validate_against_tf1_reference.py, and
+# scripts/run_original_model.py) runs a legacy Python 3.7 + TensorFlow 1.15
+# install so it can execute the *actual* original CDDD graph (tf.contrib), which
+# this package's own `requires-python = ">=3.10"` can't satisfy -- see the
+# README for exact setup commands. It is installed standalone (plain
+# `pip install tensorflow==1.15.5 protobuf==3.20.3`), never via
+# `pip install -e .`, and imports jax_cddd's dependency-free submodules
+# (vocab.py, param_names.py) straight from source via a small sys.path
+# bootstrap in each script rather than an editable install.
 
 [tool.setuptools.packages.find]
 where = ["src"]

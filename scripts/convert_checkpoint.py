@@ -2,11 +2,12 @@
 """Convert the original CDDD TF1 checkpoint (``default_model.zip``) into the JAX
 port's flat ``.npz`` weight format.
 
-Run this in the ``jax-cddd-convert`` environment (CPU TensorFlow only -- this
-script never executes the old graph, it only reads raw tensors out of the
-checkpoint by name via ``tf.train.load_checkpoint``, which works fine under any
-modern TF2 install regardless of the removed ``tf.contrib`` ops the original graph
-used).
+Run this in the ``jax-cddd-convert`` environment (CPU TensorFlow -- this script
+never executes the old graph, it only reads raw tensors out of the checkpoint by
+name via ``tf.train.load_checkpoint``, which works under both modern TF2 and the
+legacy TF1 install that environment also carries for
+``scripts/run_original_model.py``, regardless of the removed ``tf.contrib`` ops
+the original graph used).
 
 Usage:
     micromamba run -n jax-cddd-convert python scripts/convert_checkpoint.py \\
@@ -23,9 +24,11 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 
-from jax_cddd.param_names import CELL_SIZES, NUM_LAYERS, layer_names
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "src"))  # use jax_cddd from source, no install needed
+
+from jax_cddd.param_names import CELL_SIZES, NUM_LAYERS, layer_names  # noqa: E402
+
 DEFAULT_ZIP = REPO_ROOT / "src" / "jax_cddd" / "_cddd_ref_" / "default_model.zip"
 DEFAULT_OUT = REPO_ROOT / "src" / "jax_cddd" / "data" / "default_model_params.npz"
 
